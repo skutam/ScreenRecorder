@@ -1,0 +1,13 @@
+[package]
+name = "replay-recorder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1.1.6"
+tempfile = "3.27.0"
+windows-capture = "2.0.1"
+windows = { version = "0.62.2", features = ["Storage_Streams"] }
+tray-icon = "0.26.0"
+tao = "0.37.1"

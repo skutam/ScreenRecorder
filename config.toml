@@ -1,0 +1,15 @@
+[recording]
+enabled = true
+duration_seconds = 300
+fps = 60
+bitrate_mbps = 25
+output_directory = 'D:\Recordings'
+format = "mp4"
+
+[hotkeys]
+save_replay = "Ctrl+Home"
+
+[ui]
+tray_color_idle = "#00FF00"
+tray_color_saving = "#FFA500"
+tray_color_error = "#FF0000"

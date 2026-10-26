@@ -1,0 +1,13 @@
+examples/
+
+# Cargo build artifacts (including compiled binaries and documentation)
+/target/
+
+# Backup files created by rustfmt
+**/*.rs.bk
+
+# Rust profiling output
+*.profraw
+*.profdata
+
+# Keep Cargo.lock tracked: this project is an application.
