@@ -2222,6 +2222,144 @@ Po editácii súboru sa hodnoty zmenia až po Reload. Pri `fps = 0` reload
 zlyhá a Show stále zobrazí poslednú platnú konfiguráciu. Potom FPS oprav.
 Tento krok neprekonfiguruje recorder ani enkodér, iba načítaný ConfigHolder.
 
+## Cvičenie: stav workera a opakované príkazy
+
+Ďalší krok po zapojení tray a shutdown je evidovať simulovaný stav
+priamo vo worker vlákne. Toto je postup na implementáciu používateľom.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecorderState {
+    Idle,
+    Recording,
+}
+```
+
+Vo vnútri `thread::spawn(move || { ... })`, pred slučkou prijímania:
+`let mut state = RecorderState::Idle;`.
+Start mení Idle na Recording; Stop mení Recording na Idle.
+Opakovaný Start alebo Stop nemení stav. Shutdown ukončí worker nezávisle
+od stavu. V simulácii ide iba o enum, žiadne snímanie sa ešte nespúšťa.
+
+`PartialEq` umožní `==`, `Debug` výpis cez `{:?}`. `Copy` dovolí
+kopírovať tento malý enum pri priradení; neznamená zdieľanie dát.
+Stav vlastní iba worker, preto zatiaľ nepotrebujeme Mutex.
+Pri reálnom capture sa prechod na Recording uskutoční až po úspešnom
+spustení a o potvrdenom stave sa dozvie UI cez spätnú udalosť.
+
+V tray zatiaľ úspešné `send()` hlás ako odoslanie požiadavky, nie ako
+potvrdené nahrávanie. Over poradie Start, Start, Stop, Stop, Start, Quit:
+opakované príkazy nezmenia stav a Quit počká na worker cez shutdown/join.
+
+## Cvičenie: worker oznamuje stav tray menu
+
+Cieľ ďalšieho kroku: worker cez callback oznámi RecorderState; callback
+pošle AppEvent do Tao event loopu. UI mení položky až po prijatí stavu.
+Ide o návod, ktorý si používateľ zapája do src sám.
+
+V tray.rs pridáme enum `AppEvent { Menu(MenuEvent), RecorderStateChanged(RecorderState) }`
+a event loop vytvoríme ako `EventLoopBuilder::<AppEvent>`.
+Menu callback posiela `AppEvent::Menu(event)`. Samostatné proxy zachytené
+v callbacku workera posiela `AppEvent::RecorderStateChanged(state)`.
+
+Konštruktor recorderu prijme
+`notify: impl Fn(RecorderState) + Send + 'static`. `Fn` znamená opakovane
+volateľný callback, `Send` umožní jeho presun do workera, `'static` znamená,
+že nesmie obsahovať krátkodobé požičania (neznamená, že musí žiť navždy).
+Worker po inicializácii oznámi Idle a po každej skutočnej zmene svojho
+simulovaného stavu zavolá `notify(state)`.
+
+Recorder vytvoríme v menu_loop po vytvorení event loopu a proxy.
+V main už Recorder nevytvárame ani neposielame ako parameter.
+Zachytený recorder sa naďalej ovláda cez kanál a shutdown/join.
+
+V UI vetva RecorderStateChanged zavolá `set_enabled`: pri Idle povolí Start
+a zakáže Stop, pri Recording opačne. Pred prvým potvrdením sú obe položky
+zakázané. Už prijaté duplicitné príkazy naďalej ošetruje worker.
+UI objekty zostávajú na hlavnom vlákne; do workera presúvame iba callback
+s proxy. Žiadny polling ani mutex nie sú na túto komunikáciu potrebné.
+
+Overenie po implementácii: pri štarte príde Idle, po Start príde Recording
+a zmení sa dostupnosť položiek, po Stop príde Idle. Konzola a tooltip musia
+stále jasne uvádzať simuláciu; skutočný capture nie je zapojený.
+
+## Riadenie skutočného capture cez CaptureControl
+
+Príklad: `cargo run --example capture_control`.
+Sníma hlavný monitor cez `Monitor::primary()`, bez výberového dialógu.
+Po prvej snímke a potom najviac približne raz za sekundu pri príchode
+snímky vypíše počet snímok a rozmery. Po Enteri capture zastaví.
+Pri statickom obsahu nemusia pribúdať snímky ani výpisy; pohybuj oknom.
+Neukladá obraz, nekopíruje pixely do vlastného bufferu a neenkóduje video.
+
+```rust
+let control = Capture::start_free_threaded(settings)?;
+// Volajúce vlákno môže ďalej spracovávať príkazy.
+control.stop()?;
+```
+
+`Capture::start(settings)` blokuje volajúce vlákno až do ukončenia capture.
+V príkazovej slučke workera by preto znemožnilo prijatie ďalšieho Stop.
+`start_free_threaded` vytvorí vlákno spravované knižnicou a vráti riadiaci
+objekt `CaptureControl<Capture, DefaultError>`. Prijímanie snímok prebieha
+v callbackoch knižnice. `stop(self)` riadiaci objekt spotrebuje, požiada
+o zastavenie a počká na capture vlákno; môže vrátiť chybu.
+
+`type Flags = ()` a posledný parameter `()` znamenajú, že tomuto handleru
+neposielame žiadne vlastné štartovacie dáta. `_ctx` a `_control` sú zámerne
+nepoužité parametre. Na rozdiel od prvého screenshot príkladu nezastavujeme
+snímanie zvnútra callbacku po prvej snímke.
+
+V recorderi neskôr budeme držať
+`Option<CaptureControl<Capture, DefaultError>>`: Start session vytvorí,
+Stop ju cez take vyberie a zastaví, Shutdown ju zastaví pred ukončením workera.
+Enter je iba ovládanie samostatného konzolového príkladu; do tray callbacku
+čítanie stdin nepatrí. Pri integrácii treba spracovať aj samovoľné ukončenie
+a chyby capture, aby UI neukazovalo neaktuálny stav.
+
+Build príkladu bol overený. Príjem snímok a zastavenie vyžadujú manuálne
+spustenie vo Windows relácii. Vytvorenie riadiaceho objektu samo nepotvrdzuje
+príjem prvej snímky. `examples/` je v súčasnom .gitignore ignorované.
+
+## Cvičenie: samovoľné ukončenie capture
+
+Worker nesmie čakať navždy iba na používateľský príkaz, ak capture môže
+skončiť na inom vlákne. V tomto učebnom kroku použijeme `recv_timeout`
+s intervalom 100 ms a kontrolu `CaptureControl::is_finished()`.
+Tento interval nesúvisí s FPS; spracovanie snímok beží na capture vlákne.
+
+Zmeň `while let Ok(command) = receiver.recv()` na `loop`. Na začiatku
+iterácie over `capture.as_ref().is_some_and(|c| c.is_finished())`.
+Dokončenú session vyber cez `take()` a zavolaj `wait()`: pri úspechu
+oznám Idle, pri chybe Error. `wait()` nežiada zastavenie, len vyzdvihne
+výsledok vlákna. Preto ho voláme až po `is_finished()`.
+
+Potom získaj príkaz:
+
+```rust
+let command = match receiver.recv_timeout(Duration::from_millis(100)) {
+    Ok(command) => command,
+    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+};
+```
+
+Za tým zostane existujúci `match command`. Timeout nie je chyba capture,
+iba neprítomnosť príkazu v danom intervale. Kanál prebudí recv_timeout
+hneď pri príchode príkazu; nečaká vždy celých 100 ms.
+Kontrola na začiatku každej iterácie funguje aj pri priebežných príkazoch.
+
+Za celou slučkou zastav prípadnú zostávajúcu session cez take/stop,
+aby sa upratalo aj pri odpojení všetkých odosielateľov. Existujúci Shutdown
+môže session zastaviť už vo svojej vetve; následne je Option prázdny.
+
+Manuálny test po implementácii: do on_frame_arrived dočasne pridaj
+`if self.frames == 60 { return Err("Test capture failure".into()); }`.
+Pri pohybe obrazu po 60 snímkach čakaj Error v tray bez kliknutia na Stop.
+Pre čisté ukončenie namiesto Err použi vnútorné `capture_control.stop()`
+a vráť Ok(()); čakaj Idle. Testovacie zásahy potom odstráň. Nepovažuj
+neprichádzanie snímok zo statického obrazu za dôkaz ukončenia capture.
+
 ## Dohodnutý návrh recorderu
 
 - Komprimované video uchovávame v RAM; aplikácia nebude vytvárať dočasné video súbory.
