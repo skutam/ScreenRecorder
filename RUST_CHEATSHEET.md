@@ -2360,6 +2360,93 @@ Pre čisté ukončenie namiesto Err použi vnútorné `capture_control.stop()`
 a vráť Ok(()); čakaj Idle. Testovacie zásahy potom odstráň. Nepovažuj
 neprichádzanie snímok zo statického obrazu za dôkaz ukončenia capture.
 
+## Smer enkódovania: Windows základ a výber podľa schopností
+
+Začneme H.264 cez Windows Media Foundation, najprv jednou funkčnou
+implementáciou s priebežným výstupom paketov. Pre paketový prístup budeme
+skúmať priamo encoder MFT (Media Foundation Transform), nie iba hotový
+MP4 stream z windows-capture. Softvérová implementácia bude základný
+fallback; konkrétne rozlíšenie/FPS musí podporovať a stíhať.
+
+Media Foundation je API, nie synonymum CPU: môže sprístupniť aj hardvérové
+enkodéry. Priame implementácie NVENC (NVIDIA), AMF (AMD) a Intel môžeme
+pridávať postupne. Neprítomnosť samostatnej grafiky nevylučuje enkodér
+integrovanej GPU. Podpora capture a podpora enkódovania sú samostatné veci.
+
+Oddeľujeme tri rozhodnutia: kodek (H.264/HEVC/AV1), implementáciu/API
+a zariadenie. Vyberáme podľa schopností dostupných za behu, požadovaného
+rozlíšenia, FPS, pixelového formátu, profilov a ovládačov. Samotný názov
+výrobcu alebo vek GPU nestačí. Podporu dekódovania nemožno zameniť za
+podporu enkódovania. Po zisťovaní schopností nasleduje pokus o inicializáciu.
+
+Hardvér preferujeme podľa cieľa a ceny presunu snímok, ideálne na adaptéri
+capture. Pri zlyhaní inicializácie skúšame ďalšieho kompatibilného kandidáta.
+Neznižujeme potichu FPS ani nemeníme kodek. Výpadok počas nahrávania nie je
+len výmena pointera: nová session vyžaduje nový bezpečný začiatok a môže
+zmeniť parametre streamu. Prvotná verzia môže chybu oznámiť a zastaviť.
+
+Spoločný trait má oddeliť posielanie vstupu od preberania výstupu a
+dokončenia; presný podpis odvodíme od prvej reálnej implementácie.
+Pakety nesú dáta, časovanie a príznak bezpečného začiatku; konfigurácia
+kodeku sa musí zachovať tiež. Kontajner MP4/MKV skladá samostatná vrstva.
+Pre GPU cestu musí návrh neskôr podporovať textúry bez povinnej kópie
+každej surovej snímky do CPU Vec.
+
+Zdroje: [Microsoft H.264 encoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder),
+[Hardware MFTs](https://learn.microsoft.com/en-us/windows/win32/medfound/hardware-mfts).
+
+## Výpis dostupných H.264 enkodérov cez Media Foundation
+
+Príklad: [examples/list_encoders.rs](examples/list_encoders.rs).
+Spustenie z koreňa projektu: `cargo run --example list_encoders`.
+V závislosti `windows` sú explicitne zapnuté features
+`Win32_Media_MediaFoundation` a `Win32_System_Com`.
+
+Príklad inicializuje COM a Media Foundation, potom cez `MFTEnumEx` hľadá
+registrované video enkodéry s výstupným formátom H.264. Vypíše oddelene
+softvérové synchrónne, softvérové asynchrónne a hardvérové MFT, vrátane
+transcode-only kandidátov. Vypisuje čitateľný názov a dostupné CLSID.
+CLSID je identifikátor COM implementácie, nie model ani generácia GPU.
+
+Každý MFT patrí do jednej z uvedených kategórií. Asynchrónne neznamená
+automaticky hardvérové: samostatný filter ASYNCMFT vyberá softvérové
+asynchrónne transformácie; hardvérové vyberá HARDWARE.
+
+Toto je enumerácia kandidátov podľa registrácie a typu výstupu, nie úplný
+capability test. Neaktivuje enkodéry ani neskúša nastaviť rozlíšenie, FPS,
+profil alebo bitrate. Nezaručuje dostupnú session ani výkon v reálnom čase.
+Nevypisuje samostatne možnosti NVENC/AMF/Intel API. Nula hardvérových MFT
+preto neznamená, že počítač vôbec nemá hardvérové enkódovanie.
+
+Nové pojmy: MFT = Media Foundation Transform, v tomto prípade enkodér;
+IMFActivate = objekt, cez ktorý možno neskôr vytvoriť konkrétny transform;
+GUID = identifikátor napríklad kodeku alebo atribútu.
+
+Windows API vracia pole vlastnených COM referencií. Každú treba uvoľniť
+a pole samostatne odovzdať `CoTaskMemFree`. Preto používame malý RAII
+obal s Drop. `Vec::from_raw_parts` by tu nebol správny, keďže pole
+nealokoval Rust alokátor. Reťazec názvu čítame do vlastného UTF-16 vektora.
+Samostatný RAII obal páruje inicializáciu a vypnutie COM/Media Foundation.
+
+`unsafe` neznamená vypnutie všetkých kontrol Rustu. Označuje volania a
+prácu s pointermi, pri ktorých musíme platnosť a životnosť zaručiť sami.
+Príklad ich drží v malých blokoch s komentármi SAFETY. Nie je potrebné
+tento pomocný FFI kód zatiaľ naspamäť ovládať.
+
+Zdroj: [Microsoft MFTEnumEx](https://learn.microsoft.com/en-us/windows/win32/api/mfapi/nf-mfapi-mftenumex).
+Príklady sú podľa existujúceho .gitignore lokálne ignorované.
+
+## Okno nastavení z tray menu (tao)
+
+- Použi existujúci event loop; druhý event loop ani worker pre okno nepotrebuješ.
+- Pred `event_loop.run` drž `let mut settings_window: Option<Window> = None;`.
+- Druhý argument callbacku pomenuj `window_target`. `WindowBuilder::build(window_target)` vytvorí okno pripojené k existujúcemu event loopu.
+- Pri kliknutí na Nastavenia vytvor okno len vtedy, keď je `settings_window` rovné `None`. Inak zavolaj `set_visible(true)`, `set_minimized(false)` a `set_focus()` na existujúcom okne.
+- `WindowEvent::CloseRequested` je žiadosť o zatvorenie. Over `window_id`, potom nastav `settings_window = None`. Zahodenie vlastneného `Window` okno zatvorí, event loop a tray zostanú bežať.
+- `as_ref()` požičia obsah `Option`, takže pri kontrole okna nepresúvaš jeho vlastníctvo.
+- `tao` poskytuje okno a udalosti; formulár a jeho vykresľovanie doplníme samostatne.
+- Skúška: otvoriť, znovu kliknúť bez vytvorenia druhého okna, minimalizovať a obnoviť cez tray, zatvoriť krížikom a znova otvoriť, ukončiť aplikáciu cez tray.
+
 ## Dohodnutý návrh recorderu
 
 - Komprimované video uchovávame v RAM; aplikácia nebude vytvárať dočasné video súbory.

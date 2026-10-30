@@ -8,6 +8,6 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1.6"
 tempfile = "3.27.0"
 windows-capture = "2.0.1"
-windows = { version = "0.62.2", features = ["Storage_Streams"] }
+windows = { version = "0.62.2", features = ["Storage_Streams", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
 tray-icon = "0.26.0"
 tao = "0.37.1"

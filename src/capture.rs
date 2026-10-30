@@ -33,10 +33,6 @@ impl GraphicsCaptureApiHandler for Capture {
             self.last_report = Instant::now();
         }
 
-        if self.frames == 60 {
-            return Err("Test capture failure".into());
-        }
-
         Ok(())
     }
 
